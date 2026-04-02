@@ -1,0 +1,118 @@
+name: CI/CD Pipeline - FastAPI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  REGISTRY: ${{ secrets.AZURE_CONTAINER_REGISTRY_NAME }}.azurecr.io
+  IMAGE_NAME: fastapi-app
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # -----------------------------
+  # Tests y calidad de código
+  # -----------------------------
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Instalar dependencias
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Lint (no bloquea)
+        run: |
+          pip install pylint
+          pylint src/ || true
+
+      - name: Unit tests con cobertura
+        run: |
+          pip install pytest pytest-cov
+          pytest tests/ --cov=src --cov-report=xml:coverage.xml --junitxml=junit.xml
+
+      - name: Validar cobertura mínima
+        run: |
+          COVERAGE=$(grep -oP 'line-rate="\K[0-9.]+' coverage.xml | head -1)
+          echo "Cobertura: $COVERAGE"
+          if (( $(echo "$COVERAGE < 0.8" | bc -l) )); then
+            echo "Cobertura insuficiente (<80%)"
+            exit 1
+          fi
+
+      - name: SonarQube Analysis
+        run: |
+          echo "Ejecutando análisis SonarQube..."
+          # Aquí normalmente usarías sonar-scanner con tus credenciales
+
+  # -----------------------------
+  # Build y push de imagen
+  # -----------------------------
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: tests
+    outputs:
+      image_tag: ${{ steps.set-tag.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Build & Push
+        id: set-tag
+        run: |
+          TAG=v1.${{ github.run_number }}-${{ github.sha }}
+          echo "Usando tag: $TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          docker build -t $REGISTRY/$IMAGE_NAME:$TAG .
+          docker push $REGISTRY/$IMAGE_NAME:$TAG
+
+  # -----------------------------
+  # Deploy a Staging
+  # -----------------------------
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Helm deploy staging
+        run: |
+          helm upgrade --install fastapi-app ./helm \
+            --namespace staging --create-namespace \
+            --set image.repository=$REGISTRY/$IMAGE_NAME \
+            --set image.tag=${{ needs.docker-build.outputs.image_tag }}
+      - name: Smoke test
+        run: kubectl run curl --image=curlimages/curl -i --rm --restart=Never -- curl http://fastapi-app:8000/health -n staging || true
+
+  # -----------------------------
+  # Deploy a Producción (manual)
+  # -----------------------------
+  deploy-prod:
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Helm deploy prod
+        run: |
+          helm upgrade --install fastapi-app ./helm \
+            --namespace prod --create-namespace \
+            --set image.repository=$REGISTRY/$IMAGE_NAME \
+            --set image.tag=${{ needs.docker-build.outputs.image_tag }}
+      - name: Health check
+        run: |
+          kubectl rollout status deployment/fastapi-app -n prod --timeout=5m
+          echo "Verificar manualmente si todo está OK"

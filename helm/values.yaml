@@ -1,0 +1,12 @@
+image:
+  repository: myregistry.azurecr.io/fastapi-app
+  tag: latest
+
+replicaCount: 2
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
