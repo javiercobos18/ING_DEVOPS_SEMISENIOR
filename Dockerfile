@@ -10,4 +10,4 @@ WORKDIR /app
 COPY --from=builder /root/.local /root/.local
 COPY src/ ./src
 ENV PATH=/root/.local/bin:$PATH
-CMD ["python", "src/main.py"]
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "80"]

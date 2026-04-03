@@ -96,7 +96,7 @@ jobs:
             --set image.repository=$REGISTRY/$IMAGE_NAME \
             --set image.tag=${{ needs.docker-build.outputs.image_tag }}
       - name: Smoke test
-        run: kubectl run curl --image=curlimages/curl -i --rm --restart=Never -- curl http://fastapi-app:8000/health -n staging || true
+        run: kubectl run curl --image=curlimages/curl -i --rm --restart=Never -- curl http://fastapi-app/health -n staging || true
 
   # -----------------------------
   # Deploy a Producción (manual)
