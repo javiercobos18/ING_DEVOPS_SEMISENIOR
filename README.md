@@ -219,101 +219,104 @@ Si tienes dudas sobre el alcance o necesitas clarificaciones, contáctanos a: [p
 ## Contexto
 Breve descripción del reto técnico y objetivos.
 
----
+--------------------------------------------------------------------------------------------------------------------
 
 ## Solución
 
-Pipeline CI/CD
-Archivo: .github/workflows/ci-cd.yml
 
-Lo que armé en el pipeline fue lo siguiente:
+## 1. Punto de partida
 
-Tests  
-Incluí linting con flake8/ruff, pruebas unitarias con pytest y un reporte de cobertura. El pipeline está configurado para fallar si la cobertura baja de 80%, porque considero que ese es un mínimo aceptable para mantener calidad.
+El repositorio que se entregó estaba incompleto y no era ejecutable, esto debido a que mi ambiente inicial no me permitía 
+ejecutar las pruebas y tuve que optimizar mis recursos para lograrlo, allí evidencié lo siguiente:
 
-Quality Gate  
-Simulé la integración con SonarQube usando un script (scripts/simulate_sonar.sh). En un entorno real se reemplazaría por la acción oficial o un servidor SonarQube.
-También agregué un escaneo de vulnerabilidades con Trivy (scripts/trivy_scan.sh), que corta el pipeline si encuentra vulnerabilidades críticas.
+- No existía `src/` funcional
+- Faltaba `requirements.txt`
+- Helm estaba mal estructurado
+- El pipeline tenía inconsistencias
 
-Build & Push  
-La imagen Docker se construye con un build multi‑stage usando BuildKit.
-El tagging es semántico: v1.runNumber-sha (ejemplo: v1.42-3f2a1b2).
-Finalmente, la imagen se publica en Azure Container Registry (ACR), autenticando con secrets de GitHub.
+En este estado, el proyecto no corría localmente.
 
-Deploy Staging  
-El despliegue a staging es automático, usando Helm (helm upgrade --install). Después de desplegar, corro un smoke test (curl /health) para validar que el servicio esté vivo.
+## 2. Validación inicial
 
-Deploy Producción  
-Solo se ejecuta en tags de release y requiere aprobación manual. Incluye verificación de rollout y rollback automático si algo falla.
+Intenté construir la imagen con Docker:
 
-Dockerfile (multi‑stage para FastAPI)
-Usé un multi‑stage build: la etapa builder instala dependencias y genera artefactos, y la etapa runtime copia solo lo necesario.
+docker build -t fastapi-app 
 
-La base es python:3.11-slim, que me da un buen balance entre tamaño y compatibilidad.
+Resultado: falló porque no existía la carpeta src/ ni el archivo requirements.txt
 
-Creé un usuario no‑root (appuser) y ajusté permisos para evitar correr como root.
+## 3. Solución base (app mínima)
 
-Definí un healthcheck:
+Se creó una aplicación mínima con FastAPI y dependencias en requirements.txt.
+Esto permitió tener un punto de partida funcional para validar Docker y healthcheck.
 
-dockerfile
+## 4. Validación Docker y Healthcheck
 
-HEALTHCHECK CMD curl -f http://localhost:8000/health || exit 1
-Optimicé el tamaño usando pip --no-cache-dir, limpiando paquetes de build y copiando solo lo esencial.
+Una vez creada la aplicación mínima, el siguiente paso fue validar 
+que pudiera construirse y ejecutarse dentro de un contenedor Docker. 
+ 
+Primero intenté el build:
 
-El objetivo es que la imagen final quede por debajo de 150MB. Si se excede, documenté alternativas como usar distroless o wheels precompilados.
+docker build -t fastapi-app .
 
-Helm (chart y manifiestos)
-Archivos clave: chart/templates/deployment.yaml, chart/values.yaml, chart/templates/service.yaml, chart/templates/pdb.yaml
+La construcción fue exitosa. Luego ejecuté el contenedor:
 
-Lo que configuré en el chart:
+docker run -p 8000:80 fastapi-app
 
-Probes de liveness, readiness y startup.
+Al probar con curl localhost:8000, la aplicación respondió correctamente, 
+lo que confirmó que el servicio básico estaba vivo.
 
-Requests y limits de CPU/memoria.
+Sin embargo, al correr el script de healthcheck, obtuve un error 404.
+El problema era que el script esperaba un endpoint /health, mientras 
+que la aplicación solo exponía /.
 
-PodDisruptionBudget con minAvailable: 1.
+La solución fue agregar un endpoint específico de salud.
 
-Réplicas por defecto: 2.
+Con esto, tanto la prueba manual (curl localhost:8000/health) 
+como el script (python3 scripts/healthcheck.py) pasaron satisfactoriamente.
 
-Estrategia de despliegue: RollingUpdate con maxUnavailable=1 y maxSurge=1.
+## 5. Helm
 
-Node affinity (workload=api) y pod anti‑affinity para distribuir réplicas.
+El siguiente reto fue la configuración de Helm. Al ejecutar:
 
-Tolerations para nodos con taints.
 
-SecurityContext: non‑root, filesystem read‑only, sin escalamiento de privilegios.
+helm template test ./helm
 
-Anotaciones para Prometheus (prometheus.io/scrape: "true").
+aparecieron errores, faltaba Chart.yaml y el archivo deployment.yaml 
+estaba en la raíz en lugar de templates/.
 
-NetworkPolicy básica opcional para restringir tráfico.
+La solución fue crear la carpeta adecuada y mover los manifiesto, 
+después de este ajuste, el comando helm template renderizó correctamente,
+lo que validó que la estructura del chart era funcional.
 
-Scripts incluidos
-backup.sh  
-Exporta secrets de un namespace, los empaqueta en backup-YYYYMMDD-HHMMSS.tar.gz, los sube a Azure Blob Storage y limpia backups mayores a 7 días. Simula notificación a un webhook.
+## 6. Pipeline CI/CD
 
-healthcheck.py  
-Consulta el endpoint /health, genera un report.md con estado y tiempos de respuesta. Puede consultar Jenkins si se configuran credenciales.
+Para garantizar calidad y automatización, diseñé un pipeline en 
+.github/workflows/ci-cd.yml con varias etapas:
 
-simulate_sonar.sh  
-Simula un análisis SonarQube (útil para demo local sin servidor).
+- Tests: 
+		 linting con flake8/ruff, pruebas unitarias con pytest y 
+         reporte de cobertura. El pipeline falla si la cobertura 
+		 baja de 80%, asegurando un mínimo aceptable de calidad. 
+		 
+- Quality Gate: 
+		 integración simulada con SonarQube y escaneo de vulnerabilidades 
+		 con Trivy. Esto permite cortar el pipeline si se detectan 
+		 problemas críticos. 
+		 
+- Build & Push: 
+		 construcción de la imagen Docker con build multi‑stage, 
+		 tagging semántico (v1.runNumber-sha) y publicación en Azure 
+		 Container Registry.  
+		 
+- Deploy Staging: 
+		 despliegue automático con Helm y validación mediante 
+         un smoke test al endpoint /health. 
+		 
+- Deploy Producción: 
+		 solo en tags de release, requiere aprobación manual y cuenta 
+		 con rollback automático en caso de fallo.
 
-trivy_scan.sh  
-Wrapper para ejecutar Trivy contra la imagen; falla si hay vulnerabilidades críticas.
 
-Seguridad
-Decidí usar SonarQube como quality gate principal, porque es la herramienta que más he usado en proyectos financieros y de consultoría. Me da un dashboard centralizado con métricas de calidad y cobertura, y facilita la trazabilidad en entornos críticos.
-
-Trivy lo mantengo como complemento para escaneo de imágenes, y Bandit lo considero opcional si se requiere análisis específico de Python.
-
-En cuanto a secrets:
-
-En GitHub Actions los gestiono con GitHub Secrets.
-
-En Kubernetes prefiero Sealed Secrets o Secrets Store CSI con Azure Key Vault.
-
-En scripts, uso variables de entorno o integración directa con Key Vault.
-
-La imagen runtime corre como non‑root, con filesystem read‑only y sin privilegios extra.
 
 # Preguntas de diseño
 
@@ -339,7 +342,7 @@ Uso kubectl logs <pod>, kubectl describe pod <pod> y reviso eventos. También va
 Errores 503 tras deploy  
 Reviso el Service e Ingress, confirmo que los pods pasaron readiness y valido conectividad interna con kubectl exec curl.
 
-Blue‑green en AKS  
+Blue/green en AKS  
 Despliego una versión paralela (green) en un namespace o con labels distintos, valido con smoke tests y luego redirijo tráfico con el Ingress Controller. Mantengo blue como fallback.
 
 # Seguridad y compliance
@@ -364,6 +367,8 @@ SonarQube vs Bandit/Trivy: preferí SonarQube porque refleja mi experiencia real
 
 Build once, deploy many: un único build de imagen garantiza reproducibilidad y trazabilidad.
 
-Seguridad pragmática: usuario non‑root, filesystem protegido y manejo de secrets con GitHub/Kubernetes.
+Seguridad pragmática: usuario nonroot, filesystem protegido y manejo de secrets con GitHub/Kubernetes.
 
 Resiliencia: probes estrictos y rolling updates para despliegues seguros.
+
+
